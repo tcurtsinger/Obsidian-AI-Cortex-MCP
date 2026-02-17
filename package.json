@@ -1,0 +1,43 @@
+{
+  "name": "obsidian-ai-cortex-mcp",
+  "version": "1.1.0",
+  "description": "Generic MCP server for Obsidian vault access (read, write, search, and context tooling)",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "gray-matter": "^4.0.3",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "obsidian",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "cursor",
+    "codex",
+    "notes",
+    "markdown"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP/issues"
+  },
+  "homepage": "https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP#readme"
+}
