@@ -1,7 +1,7 @@
 {
-  "name": "obsidian-ai-cortex-mcp",
-  "version": "1.1.0",
-  "description": "Generic MCP server for Obsidian vault access (read, write, search, and context tooling)",
+  "name": "obsidian-mcp",
+  "version": "1.2.0",
+  "description": "MCP Server for Obsidian vault - read, write, search notes directly via filesystem",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -25,19 +25,8 @@
     "obsidian",
     "mcp",
     "model-context-protocol",
-    "claude",
     "cursor",
-    "codex",
     "notes",
     "markdown"
-  ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP.git"
-  },
-  "bugs": {
-    "url": "https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP/issues"
-  },
-  "homepage": "https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP#readme"
+  ]
 }

@@ -1,132 +1,166 @@
-# Obsidian AI Cortex MCP
+# Obsidian MCP Server
 
-Generic MCP (Model Context Protocol) server for direct Obsidian vault access.  
-It works with Claude Desktop, Claude Code, Codex, Cursor, and other MCP clients.
+MCP (Model Context Protocol) server for direct Obsidian vault access. Works without Obsidian running.
 
-## What It Does
+## Features
 
-- Read, write, append, move, and delete markdown notes.
-- Search across your vault and inspect folder structure.
-- Manage frontmatter and daily notes.
-- Run vault health checks (backlinks, broken links, freshness, context integrity).
-- Load startup context in one call and safely upsert markdown sections.
+23 tools for complete vault management and deterministic multi-project workflows:
 
-## Tools Included
-
-### Core
+### Core Tools
 | Tool | Description |
 |------|-------------|
-| `vault_read` | Read one note |
-| `vault_batch_read` | Read multiple notes |
-| `vault_write` | Create or overwrite a note |
-| `vault_append` | Append content to a note |
+| `vault_read` | Read a single note |
+| `vault_batch_read` | Read multiple notes at once |
+| `vault_write` | Create or update a note |
+| `vault_append` | Append content to existing note |
 | `vault_delete` | Delete a note |
-| `vault_move` | Move or rename a note |
+| `vault_move` | Move or rename notes |
 
-### Discovery
+### Discovery Tools
 | Tool | Description |
 |------|-------------|
-| `vault_list` | List files and folders |
-| `vault_tree` | Return folder hierarchy |
-| `vault_search` | Full-text search |
-| `vault_recent` | Recently modified notes |
-| `vault_find_by_tag` | Find notes by frontmatter tags |
-| `vault_frontmatter` | Get/set frontmatter |
+| `vault_list` | List files/folders |
+| `vault_tree` | Get folder hierarchy |
+| `vault_search` | Search text across all notes |
+| `vault_recent` | Find recently modified files |
+| `vault_find_by_tag` | Find docs by frontmatter tag |
+| `vault_frontmatter` | Query/update YAML metadata |
 
-### Maintenance
+### Maintenance Tools
 | Tool | Description |
 |------|-------------|
-| `vault_backlinks` | Find notes linking to a target note |
-| `vault_broken_links` | Find unresolved wiki links |
-| `vault_stats` | Vault health and stats |
-| `vault_daily_note` | Read/create daily notes |
-| `vault_context_bootstrap` | Load core context notes + recent changes |
-| `vault_upsert_section` | Replace or insert a markdown section by heading |
+| `vault_backlinks` | Find docs linking to a given doc |
+| `vault_broken_links` | Find broken wiki-links |
+| `vault_stats` | Vault health and statistics |
+| `vault_stale_state_checks` | Stale-state checks across project contexts/trackers |
+| `vault_daily_note` | Access daily notes |
+| `vault_context_bootstrap` | Load startup context pack in one call |
+| `vault_upsert_section` | Replace or insert a specific markdown section |
 
-## Quick Start
+### Flywheel Macro Tools (Deterministic)
+| Tool | Description |
+|------|-------------|
+| `vault_start_session` | Resolve active project + run scoped bootstrap + summarize priorities/blockers/next actions |
+| `vault_checkpoint` | Update project context + append session log + pointer note + optional tracker sync |
+| `vault_tracker_sync` | Structured tracker sync (JSON state + rendered table + sync log) |
+| `vault_resume` | Deterministic post-compact resume from project context/session log/tracker |
+
+## Setup
+
+### 1. Install Dependencies
 
 ```bash
-git clone https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP.git
-cd Obsidian-AI-Cortex-MCP
+cd obsidian-mcp
 npm install
+```
+
+### 2. Build
+
+```bash
 npm run build
 ```
 
-## Server Configuration
+### 3. Configure Cursor
 
-Set this required environment variable:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OBSIDIAN_VAULT_PATH` | Yes | Absolute path to your Obsidian vault |
-
-Use this MCP server definition in your client config:
+Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "obsidian-ai-cortex": {
+    "obsidian": {
       "command": "node",
-      "args": ["/absolute/path/to/Obsidian-AI-Cortex-MCP/dist/index.js"],
+      "args": ["/path/to/obsidian-mcp/dist/index.js"],
       "env": {
-        "OBSIDIAN_VAULT_PATH": "/absolute/path/to/your-vault"
+        "OBSIDIAN_VAULT_PATH": "/path/to/your/vault"
       }
     }
   }
 }
 ```
 
-## Client Examples
+### 4. Restart Cursor
 
-### Codex CLI
+The MCP server loads on Cursor startup.
 
-```bash
-codex mcp add obsidian-ai-cortex \
-  --env OBSIDIAN_VAULT_PATH="/absolute/path/to/your-vault" \
-  -- node "/absolute/path/to/Obsidian-AI-Cortex-MCP/dist/index.js"
-```
+## Configuration
 
-### Cursor
-
-Add the same server block to your Cursor MCP config (commonly `.cursor/mcp.json`).
-
-### Claude Desktop / Claude Code
-
-Add the same server block to your MCP server configuration for each app.
-
-## Optional Context Convention
-
-If you keep these notes, `vault_context_bootstrap` and `vault_stats` become more useful:
-
-- `Home.md`
-- `_Context/Now.md`
-- `_Context/Project.md`
-- `_Context/Index.md`
-
-You can still use all tools without this structure.
+| Environment Variable | Description | Required |
+|---------------------|-------------|----------|
+| `OBSIDIAN_VAULT_PATH` | Full path to your Obsidian vault folder | Yes |
 
 ## Usage Examples
 
+### Start session (deterministic)
 ```text
-vault_read path="Home.md"
-vault_search query="roadmap" limit=10
-vault_context_bootstrap project_context_path="_Context/Project.md"
-vault_upsert_section path="_Context/Now.md" heading="Current Sprint" level=2 content="- Task 1"
-vault_stats
+vault_start_session
 ```
 
-## Security
+### Start session with project override
+```text
+vault_start_session override_project_context_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex/_Context.md"
+```
 
-- Path traversal is blocked (tools cannot escape vault root).
-- No credentials are required or stored.
-- Frontmatter `updated` is auto-refreshed on write/append/frontmatter updates.
+### Scoped bootstrap (no cross-project recency bleed)
+```text
+vault_context_bootstrap project_context_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex/_Context.md" include_recent=true recent_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex"
+```
+
+### Deterministic checkpoint
+```text
+vault_checkpoint priorities=["Validate startup macro in Cursor","Validate resume macro in Claude"] blockers=["None"] next_actions=["Run end-to-end test","Document edge cases","Tune thresholds"]
+```
+
+### Structured tracker sync
+```text
+vault_tracker_sync updates=[{"id":"E18","status":"In Validation","note":"Ready for QA"}]
+```
+
+### Resume after compact
+```text
+vault_resume
+```
+
+### Stale-state checks
+```text
+vault_stale_state_checks tracker_stale_days=7 validation_stale_days=14 project_context_stale_days=14
+```
+
+## Structured Tracker Model
+
+`vault_tracker_sync` maintains machine-first tracker sections:
+
+- `## Tracker State (JSON)` — canonical structured issue state
+- `## Tracker Table` — rendered markdown view from canonical JSON
+- `## Tracker Sync Log` — deterministic audit trail of updates
+
+This reduces ambiguous table edits and token-heavy revalidation.
 
 ## Development
 
+### Build
 ```bash
 npm run build
+```
+
+### Watch mode
+```bash
 npm run dev
 ```
+
+## Tech Stack
+
+- Node.js / TypeScript
+- MCP SDK (`@modelcontextprotocol/sdk`)
+- gray-matter (frontmatter parsing)
+- zod (parameter validation)
+
+## Security
+
+- No credentials stored in code
+- Vault path configured via environment variable
+- Direct filesystem access (no network calls)
+- Path traversal blocked (paths cannot escape vault root)
+- Frontmatter `updated` is auto-refreshed on write/append/frontmatter updates
 
 ## License
 

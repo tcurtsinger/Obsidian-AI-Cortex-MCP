@@ -158,6 +158,360 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const DEFAULT_PROJECT_CONTEXT_PATH = "Work/Projects/AI Tools/MCP - Obsidian AI Cortex/_Context.md";
+const DEFAULT_HOME_PATH = "Home.md";
+const DEFAULT_NOW_PATH = "_Context/Now.md";
+const DEFAULT_SESSION_LOG_POINTER_DIR = "Work/Session End Logs";
+
+interface StartupNote {
+  path: string;
+  success: boolean;
+  frontmatter?: Record<string, any> | null;
+  content?: string;
+  error?: string;
+}
+
+interface TrackerIssue {
+  id: string;
+  status: string;
+  title?: string;
+  type?: string;
+  priority?: string;
+  owner?: string;
+  note?: string;
+  created?: string;
+  updated?: string;
+  [key: string]: any;
+}
+
+interface TrackerUpdateInput {
+  id: string;
+  action?: "upsert" | "delete";
+  status?: string;
+  note?: string;
+  title?: string;
+  type?: string;
+  priority?: string;
+  owner?: string;
+}
+
+interface TrackerParseResult {
+  issues: TrackerIssue[];
+  source: "json_state" | "table_import" | "empty";
+  warnings: string[];
+  duplicate_ids: string[];
+}
+
+function parseDateInput(value: unknown): Date | null {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+function toIsoDateString(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function parseBulletItems(sectionContent: string | null | undefined): string[] {
+  if (!sectionContent) return [];
+  return sectionContent
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(?:[-*]|\d+\.)\s+(.*)$/);
+      return match ? match[1].trim() : "";
+    })
+    .filter(Boolean);
+}
+
+function toBulletSection(items: string[]): string {
+  const cleaned = items.map((item) => item.trim()).filter(Boolean);
+  if (cleaned.length === 0) return "- _No updates_";
+  return cleaned.map((item) => `- ${item}`).join("\n");
+}
+
+function findSectionBounds(markdownBody: string, heading: string): { start: number; end: number; level: number } | null {
+  const normalizedBody = markdownBody.replace(/\r\n/g, "\n");
+  const lines = normalizedBody.split("\n");
+  const headingRegex = new RegExp(`^(#{1,6})\\s+${escapeRegExp(heading.trim())}\\s*$`, "i");
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].trim().match(headingRegex);
+    if (!match) continue;
+    const level = match[1].length;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      const boundary = lines[j].trim().match(/^(#{1,6})\s+/);
+      if (!boundary) continue;
+      if (boundary[1].length <= level) {
+        end = j;
+        break;
+      }
+    }
+    return { start: i, end, level };
+  }
+  return null;
+}
+
+function getSectionContent(markdownBody: string, heading: string): string | null {
+  const bounds = findSectionBounds(markdownBody, heading);
+  if (!bounds) return null;
+  const lines = markdownBody.replace(/\r\n/g, "\n").split("\n");
+  return lines.slice(bounds.start + 1, bounds.end).join("\n").trim();
+}
+
+function upsertSectionContent(
+  markdownBody: string,
+  heading: string,
+  content: string,
+  level = 2
+): { body: string; action: "updated" | "inserted" } {
+  const safeHeading = heading.replace(/^#+\s*/, "").trim();
+  const headingLine = `${"#".repeat(level)} ${safeHeading}`;
+  const normalizedBody = markdownBody.replace(/\r\n/g, "\n").trimEnd();
+  const sectionPayload = [headingLine, "", content.trimEnd()].join("\n");
+  const lines = normalizedBody.length > 0 ? normalizedBody.split("\n") : [];
+  const bounds = findSectionBounds(normalizedBody, safeHeading);
+
+  if (!bounds) {
+    const next = normalizedBody.length > 0
+      ? `${normalizedBody}\n\n${sectionPayload}\n`
+      : `${sectionPayload}\n`;
+    return { body: next.replace(/\n{3,}/g, "\n\n"), action: "inserted" };
+  }
+
+  const nextLines = [
+    ...lines.slice(0, bounds.start),
+    ...sectionPayload.split("\n"),
+    ...lines.slice(bounds.end),
+  ];
+  const nextBody = `${nextLines.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
+  return { body: nextBody, action: "updated" };
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  let trimmed = line.trim();
+  if (!trimmed.includes("|")) return [];
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function parseMarkdownTables(markdownBody: string): Array<{ headers: string[]; rows: string[][] }> {
+  const lines = markdownBody.replace(/\r\n/g, "\n").split("\n");
+  const tables: Array<{ headers: string[]; rows: string[][] }> = [];
+  const dividerRegex = /^\s*\|?[\s:-]+\|[\s|:-]*$/;
+
+  let i = 0;
+  while (i < lines.length - 1) {
+    const headerLine = lines[i];
+    const dividerLine = lines[i + 1];
+    if (!headerLine.includes("|") || !dividerRegex.test(dividerLine.trim())) {
+      i++;
+      continue;
+    }
+
+    const headers = splitMarkdownTableRow(headerLine);
+    if (headers.length === 0) {
+      i++;
+      continue;
+    }
+
+    const rows: string[][] = [];
+    let j = i + 2;
+    while (j < lines.length) {
+      const rowLine = lines[j];
+      if (!rowLine.includes("|") || rowLine.trim().length === 0) break;
+      const row = splitMarkdownTableRow(rowLine);
+      if (row.length > 0) rows.push(row);
+      j++;
+    }
+
+    tables.push({ headers, rows });
+    i = j + 1;
+  }
+
+  return tables;
+}
+
+function normalizeIssueId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().toUpperCase();
+}
+
+function normalizeTrackerStatus(status: unknown): string {
+  if (typeof status !== "string" || !status.trim()) return "Open";
+  const normalized = status.trim().toLowerCase();
+  if (["open", "new", "todo", "to do", "backlog"].includes(normalized)) return "Open";
+  if (["in progress", "in-progress", "wip", "doing"].includes(normalized)) return "In Progress";
+  if (["in validation", "validation", "qa", "testing", "in review"].includes(normalized)) return "In Validation";
+  if (["blocked", "on hold", "hold"].includes(normalized)) return "Blocked";
+  if (["done", "fixed", "closed", "resolved", "complete", "completed"].includes(normalized)) return "Done";
+  return status.trim();
+}
+
+function normalizeTrackerIssues(rawIssues: TrackerIssue[]): { issues: TrackerIssue[]; duplicateIds: string[] } {
+  const deduped: TrackerIssue[] = [];
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+
+  for (const issue of rawIssues) {
+    const id = normalizeIssueId(issue.id);
+    if (!id) continue;
+    if (seen.has(id)) {
+      duplicates.add(id);
+      continue;
+    }
+    seen.add(id);
+
+    deduped.push({
+      ...issue,
+      id,
+      status: normalizeTrackerStatus(issue.status),
+      updated: typeof issue.updated === "string" ? issue.updated : undefined,
+      created: typeof issue.created === "string" ? issue.created : undefined,
+    });
+  }
+
+  return {
+    issues: deduped,
+    duplicateIds: Array.from(duplicates).sort(),
+  };
+}
+
+function parseTrackerState(markdownBody: string): TrackerParseResult {
+  const warnings: string[] = [];
+  const sectionContent = getSectionContent(markdownBody, "Tracker State (JSON)");
+  const emptyResult: TrackerParseResult = {
+    issues: [],
+    source: "empty",
+    warnings,
+    duplicate_ids: [],
+  };
+
+  if (sectionContent) {
+    const codeBlockMatch = sectionContent.match(/```json\s*([\s\S]*?)```/i);
+    const jsonPayload = (codeBlockMatch ? codeBlockMatch[1] : sectionContent).trim();
+    if (jsonPayload) {
+      try {
+        const parsed = JSON.parse(jsonPayload);
+        if (Array.isArray(parsed)) {
+          const normalized = normalizeTrackerIssues(parsed as TrackerIssue[]);
+          return {
+            issues: normalized.issues,
+            source: "json_state",
+            warnings,
+            duplicate_ids: normalized.duplicateIds,
+          };
+        }
+        warnings.push("Tracker State JSON is not an array; falling back to table import.");
+      } catch (error) {
+        warnings.push(`Tracker State JSON parse error: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
+    }
+  }
+
+  const tables = parseMarkdownTables(markdownBody);
+  const imported: TrackerIssue[] = [];
+
+  for (const table of tables) {
+    const headerMap = new Map<string, number>();
+    table.headers.forEach((header, index) => headerMap.set(header.toLowerCase().trim(), index));
+
+    const idIndex = headerMap.get("id");
+    const statusIndex = headerMap.get("status");
+    if (idIndex === undefined || statusIndex === undefined) continue;
+
+    const titleIndex =
+      headerMap.get("title") ??
+      headerMap.get("summary") ??
+      headerMap.get("issue") ??
+      headerMap.get("description") ??
+      headerMap.get("name");
+    const typeIndex = headerMap.get("type");
+    const priorityIndex = headerMap.get("priority");
+    const ownerIndex = headerMap.get("owner");
+    const noteIndex = headerMap.get("note") ?? headerMap.get("notes");
+    const updatedIndex =
+      headerMap.get("updated") ??
+      headerMap.get("last updated") ??
+      headerMap.get("last_updated") ??
+      headerMap.get("date");
+
+    for (const row of table.rows) {
+      const id = normalizeIssueId(row[idIndex] ?? "");
+      if (!id) continue;
+      imported.push({
+        id,
+        status: normalizeTrackerStatus(row[statusIndex] ?? "Open"),
+        title: titleIndex !== undefined ? row[titleIndex] : undefined,
+        type: typeIndex !== undefined ? row[typeIndex] : undefined,
+        priority: priorityIndex !== undefined ? row[priorityIndex] : undefined,
+        owner: ownerIndex !== undefined ? row[ownerIndex] : undefined,
+        note: noteIndex !== undefined ? row[noteIndex] : undefined,
+        updated: updatedIndex !== undefined ? row[updatedIndex] : undefined,
+      });
+    }
+  }
+
+  if (imported.length === 0) return emptyResult;
+
+  const normalized = normalizeTrackerIssues(imported);
+  return {
+    issues: normalized.issues,
+    source: "table_import",
+    warnings,
+    duplicate_ids: normalized.duplicateIds,
+  };
+}
+
+function sanitizeTableCell(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+function renderTrackerTable(issues: TrackerIssue[]): string {
+  const header = "| ID | Type | Status | Priority | Updated | Title | Note |";
+  const separator = "|---|---|---|---|---|---|---|";
+  if (issues.length === 0) {
+    return `${header}\n${separator}\n| _none_ |  | Open |  |  |  |  |`;
+  }
+
+  const statusOrder: Record<string, number> = {
+    Open: 1,
+    "In Progress": 2,
+    "In Validation": 3,
+    Blocked: 4,
+    Done: 5,
+  };
+
+  const sorted = [...issues].sort((a, b) => {
+    const statusA = statusOrder[normalizeTrackerStatus(a.status)] ?? 99;
+    const statusB = statusOrder[normalizeTrackerStatus(b.status)] ?? 99;
+    if (statusA !== statusB) return statusA - statusB;
+    return a.id.localeCompare(b.id);
+  });
+
+  const rows = sorted.map((issue) => {
+    const updatedDate = parseDateInput(issue.updated);
+    return `| ${sanitizeTableCell(issue.id)} | ${sanitizeTableCell(issue.type ?? "")} | ${sanitizeTableCell(normalizeTrackerStatus(issue.status))} | ${sanitizeTableCell(issue.priority ?? "")} | ${sanitizeTableCell(updatedDate ? toIsoDateString(updatedDate) : issue.updated ?? "")} | ${sanitizeTableCell(issue.title ?? "")} | ${sanitizeTableCell(issue.note ?? "")} |`;
+  });
+
+  return [header, separator, ...rows].join("\n");
+}
+
+function getTrackerStatusCounts(issues: TrackerIssue[]): Record<string, number> {
+  return issues.reduce<Record<string, number>>((acc, issue) => {
+    const status = normalizeTrackerStatus(issue.status);
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+}
+
 /**
  * Registers all vault tools with the MCP server
  */
@@ -177,6 +531,553 @@ export function registerVaultTools(server: McpServer, vaultPath: string): void {
     return {
       normalizedPath,
       fullPath: resolveVaultPath(vaultRoot, normalizedPath),
+    };
+  }
+
+  function deriveProjectDir(projectContextPath: string): string {
+    const normalized = projectContextPath.replace(/\\/g, "/");
+    const dir = path.posix.dirname(normalized);
+    return dir === "." ? "" : dir;
+  }
+
+  async function readNoteRecord(notePath: string, includeFrontmatter = true): Promise<StartupNote> {
+    try {
+      const { normalizedPath, fullPath } = resolveNotePath(notePath);
+      if (!await pathExists(fullPath)) {
+        return {
+          path: normalizedPath,
+          success: false,
+          error: "Note not found",
+        };
+      }
+
+      const raw = await fs.readFile(fullPath, "utf-8");
+      if (!includeFrontmatter) {
+        return {
+          path: normalizedPath,
+          success: true,
+          content: raw,
+        };
+      }
+
+      const { data: frontmatter, content } = matter(raw);
+      return {
+        path: normalizedPath,
+        success: true,
+        frontmatter: Object.keys(frontmatter).length > 0 ? frontmatter : null,
+        content: content.trim(),
+      };
+    } catch (error) {
+      return {
+        path: notePath,
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      };
+    }
+  }
+
+  async function writeNoteWithFrontmatter(notePath: string, body: string, frontmatterData?: Record<string, any>): Promise<void> {
+    const { fullPath } = resolveNotePath(notePath);
+    await ensureDir(fullPath);
+    const finalBody = body.trimEnd() + "\n";
+    const finalContent = frontmatterData && Object.keys(frontmatterData).length > 0
+      ? matter.stringify(finalBody, touchUpdated(frontmatterData))
+      : finalBody;
+    await fs.writeFile(fullPath, finalContent, "utf-8");
+  }
+
+  async function appendMarkdownBlock(notePath: string, block: string, fallbackTitle?: string): Promise<void> {
+    const { normalizedPath, fullPath } = resolveNotePath(notePath);
+    await ensureDir(fullPath);
+    if (!await pathExists(fullPath)) {
+      const title = fallbackTitle ?? `# ${path.posix.basename(normalizedPath, ".md")}`;
+      await fs.writeFile(fullPath, `${title}\n\n${block.trim()}\n`, "utf-8");
+      return;
+    }
+
+    const existingRaw = await fs.readFile(fullPath, "utf-8");
+    const parsed = matter(existingRaw);
+    const hasFrontmatter = Object.keys(parsed.data).length > 0;
+    const nextBody = `${parsed.content.trimEnd()}\n\n---\n\n${block.trim()}\n`;
+    const final = hasFrontmatter
+      ? matter.stringify(nextBody, touchUpdated(parsed.data))
+      : nextBody;
+    await fs.writeFile(fullPath, final, "utf-8");
+  }
+
+  async function ensureRootSessionPointer(sessionDate: string, projectLogPath: string, projectName: string): Promise<{ path: string; updated: boolean }> {
+    const pointerPath = `${DEFAULT_SESSION_LOG_POINTER_DIR}/${sessionDate}.md`;
+    const { normalizedPath, fullPath } = resolveNotePath(pointerPath);
+    await ensureDir(fullPath);
+
+    const pointerLink = `[[${projectLogPath}|${projectName} Session Log ${sessionDate}]]`;
+    if (!await pathExists(fullPath)) {
+      const initial = [
+        `# Session End Log — ${sessionDate}`,
+        "",
+        "> Pointer note. Canonical session details in project-local logs.",
+        "",
+        `- ${pointerLink}`,
+        "",
+      ].join("\n");
+      await writeNoteWithFrontmatter(pointerPath, initial, {
+        title: `Session End Log ${sessionDate}`,
+        type: "pointer",
+        created: new Date().toISOString(),
+      });
+      return { path: normalizedPath, updated: true };
+    }
+
+    const raw = await fs.readFile(fullPath, "utf-8");
+    const parsed = matter(raw);
+    const lines = parsed.content.split("\n");
+    const alreadyLinked = lines.some((line) => line.includes(`[[${projectLogPath}|`) || line.includes(`[[${projectLogPath}]]`));
+    if (alreadyLinked) {
+      return { path: normalizedPath, updated: false };
+    }
+
+    const nextBody = `${parsed.content.trimEnd()}\n- ${pointerLink}\n`;
+    const final = Object.keys(parsed.data).length > 0
+      ? matter.stringify(nextBody, touchUpdated(parsed.data))
+      : nextBody;
+    await fs.writeFile(fullPath, final, "utf-8");
+    return { path: normalizedPath, updated: true };
+  }
+
+  async function resolveActiveProjectContextPath(overrideProjectContextPath?: string): Promise<{
+    project_context_path: string;
+    source: "override" | "now_frontmatter" | "fallback";
+  }> {
+    if (overrideProjectContextPath && overrideProjectContextPath.trim()) {
+      return {
+        project_context_path: normalizeNotePath(overrideProjectContextPath),
+        source: "override",
+      };
+    }
+
+    const nowRecord = await readNoteRecord(DEFAULT_NOW_PATH, true);
+    if (nowRecord.success && nowRecord.frontmatter && typeof nowRecord.frontmatter.active_project_context === "string") {
+      return {
+        project_context_path: normalizeNotePath(nowRecord.frontmatter.active_project_context),
+        source: "now_frontmatter",
+      };
+    }
+
+    return {
+      project_context_path: normalizeNotePath(DEFAULT_PROJECT_CONTEXT_PATH),
+      source: "fallback",
+    };
+  }
+
+  async function runContextBootstrapInternal(params: {
+    project_context_path: string;
+    days: number;
+    recent_limit: number;
+    include_frontmatter: boolean;
+    include_recent: boolean;
+    recent_path?: string;
+  }): Promise<{
+    startup_paths: string[];
+    loaded_notes: StartupNote[];
+    loaded_successfully: number;
+    recent: {
+      enabled: boolean;
+      days: number;
+      scope_path: string;
+      total_found: number;
+      files: Array<{ path: string; modified: string; days_ago: number }>;
+    };
+  }> {
+    const startupPaths = [
+      DEFAULT_HOME_PATH,
+      DEFAULT_NOW_PATH,
+      params.project_context_path,
+    ];
+    const loadedNotes: StartupNote[] = [];
+    for (const startupPath of startupPaths) {
+      loadedNotes.push(await readNoteRecord(startupPath, params.include_frontmatter));
+    }
+
+    if (!params.include_recent) {
+      return {
+        startup_paths: startupPaths,
+        loaded_notes: loadedNotes,
+        loaded_successfully: loadedNotes.filter((note) => note.success).length,
+        recent: {
+          enabled: false,
+          days: params.days,
+          scope_path: "",
+          total_found: 0,
+          files: [],
+        },
+      };
+    }
+
+    let recentScopePath = "";
+    let recentRootDir = vaultRoot;
+    if (params.recent_path && params.recent_path.trim()) {
+      const scope = resolveDirectoryPath(params.recent_path);
+      if (!await pathExists(scope.fullPath)) {
+        throw new Error(`Recent scope not found: ${scope.normalizedPath || "/"}`);
+      }
+      recentScopePath = scope.normalizedPath;
+      recentRootDir = scope.fullPath;
+    }
+
+    const files = await getMarkdownFiles(recentRootDir, vaultRoot);
+    const cutoff = Date.now() - (params.days * 24 * 60 * 60 * 1000);
+    const recentFiles: Array<{ path: string; modified: string; days_ago: number }> = [];
+    for (const filePath of files) {
+      try {
+        const stats = await fs.stat(resolveVaultPath(vaultRoot, filePath));
+        if (stats.mtime.getTime() < cutoff) continue;
+        recentFiles.push({
+          path: filePath,
+          modified: stats.mtime.toISOString(),
+          days_ago: Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24)),
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    recentFiles.sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+    return {
+      startup_paths: startupPaths,
+      loaded_notes: loadedNotes,
+      loaded_successfully: loadedNotes.filter((note) => note.success).length,
+      recent: {
+        enabled: true,
+        days: params.days,
+        scope_path: recentScopePath,
+        total_found: recentFiles.length,
+        files: recentFiles.slice(0, params.recent_limit),
+      },
+    };
+  }
+
+  function summarizeProjectContext(projectContextContent: string): {
+    priorities: string[];
+    blockers: string[];
+    next_3_actions: string[];
+  } {
+    const priorities = (
+      parseBulletItems(getSectionContent(projectContextContent, "Current Priorities"))[0]
+        ? parseBulletItems(getSectionContent(projectContextContent, "Current Priorities"))
+        : parseBulletItems(getSectionContent(projectContextContent, "Priorities"))
+    );
+    const blockers = [
+      ...parseBulletItems(getSectionContent(projectContextContent, "Known Risks/Blockers")),
+      ...parseBulletItems(getSectionContent(projectContextContent, "Blockers")),
+    ];
+    const nextActionsSource = [
+      ...parseBulletItems(getSectionContent(projectContextContent, "Next 3 Actions")),
+      ...parseBulletItems(getSectionContent(projectContextContent, "Next Actions")),
+      ...parseBulletItems(getSectionContent(projectContextContent, "Next Steps")),
+    ];
+
+    return {
+      priorities: priorities.slice(0, 10),
+      blockers: blockers.slice(0, 10),
+      next_3_actions: nextActionsSource.slice(0, 3),
+    };
+  }
+
+  async function runTrackerSyncInternal(params: {
+    project_context_path: string;
+    tracker_path?: string;
+    updates: TrackerUpdateInput[];
+    create_missing: boolean;
+    render_table: boolean;
+    max_log_entries: number;
+    log_to_session: boolean;
+    session_date: string;
+  }): Promise<Record<string, any>> {
+    const projectContext = await readNoteRecord(params.project_context_path, true);
+    if (!projectContext.success || !projectContext.content) {
+      return {
+        success: false,
+        error: projectContext.error ?? `Unable to read project context: ${params.project_context_path}`,
+      };
+    }
+
+    const resolvedProjectContextPath = normalizeNotePath(params.project_context_path);
+    const projectDir = deriveProjectDir(resolvedProjectContextPath);
+    const projectName = path.posix.basename(projectDir || resolvedProjectContextPath, ".md");
+    const trackerPathFromFrontmatter = typeof projectContext.frontmatter?.tracker_path === "string"
+      ? projectContext.frontmatter?.tracker_path
+      : "";
+    const trackerPath = params.tracker_path?.trim()
+      ? normalizeNotePath(params.tracker_path)
+      : (trackerPathFromFrontmatter ? normalizeNotePath(trackerPathFromFrontmatter) : "");
+
+    if (!trackerPath) {
+      return {
+        success: true,
+        skipped: true,
+        reason: "No tracker configured for this project.",
+        project_context_path: resolvedProjectContextPath,
+      };
+    }
+
+    const { normalizedPath: normalizedTrackerPath, fullPath: trackerFullPath } = resolveNotePath(trackerPath);
+    const trackerExists = await pathExists(trackerFullPath);
+    const trackerRaw = trackerExists
+      ? await fs.readFile(trackerFullPath, "utf-8")
+      : "";
+    const trackerParsed = trackerExists ? matter(trackerRaw) : { data: {}, content: "" };
+    const trackerState = parseTrackerState(trackerParsed.content || "");
+
+    let issues = [...trackerState.issues];
+    const updatedIds: string[] = [];
+    const createdIds: string[] = [];
+    const deletedIds: string[] = [];
+    const unresolvedIds: string[] = [];
+
+    const nowIso = new Date().toISOString();
+    const todayIso = getTodayIsoDate();
+
+    for (const update of params.updates) {
+      const normalizedId = normalizeIssueId(update.id);
+      if (!normalizedId) {
+        unresolvedIds.push(update.id);
+        continue;
+      }
+
+      const action = update.action ?? "upsert";
+      const index = issues.findIndex((issue) => issue.id === normalizedId);
+
+      if (action === "delete") {
+        if (index >= 0) {
+          issues.splice(index, 1);
+          deletedIds.push(normalizedId);
+        } else {
+          unresolvedIds.push(normalizedId);
+        }
+        continue;
+      }
+
+      if (index < 0) {
+        if (!params.create_missing) {
+          unresolvedIds.push(normalizedId);
+          continue;
+        }
+        const createdIssue: TrackerIssue = {
+          id: normalizedId,
+          status: normalizeTrackerStatus(update.status ?? "Open"),
+          title: update.title?.trim() || "",
+          type: update.type?.trim() || "",
+          priority: update.priority?.trim() || "",
+          owner: update.owner?.trim() || "",
+          note: update.note?.trim() || "",
+          created: todayIso,
+          updated: nowIso,
+        };
+        issues.push(createdIssue);
+        createdIds.push(normalizedId);
+        continue;
+      }
+
+      const existing = issues[index];
+      issues[index] = {
+        ...existing,
+        status: update.status ? normalizeTrackerStatus(update.status) : normalizeTrackerStatus(existing.status),
+        title: update.title !== undefined ? update.title.trim() : existing.title,
+        type: update.type !== undefined ? update.type.trim() : existing.type,
+        priority: update.priority !== undefined ? update.priority.trim() : existing.priority,
+        owner: update.owner !== undefined ? update.owner.trim() : existing.owner,
+        note: update.note !== undefined ? update.note.trim() : existing.note,
+        updated: nowIso,
+      };
+      updatedIds.push(normalizedId);
+    }
+
+    const normalized = normalizeTrackerIssues(issues);
+    issues = normalized.issues;
+    const duplicateIds = Array.from(new Set([...trackerState.duplicate_ids, ...normalized.duplicateIds])).sort();
+
+    let trackerBody = trackerParsed.content || "";
+    const trackerStatePayload = [
+      "```json",
+      JSON.stringify(issues, null, 2),
+      "```",
+    ].join("\n");
+    trackerBody = upsertSectionContent(trackerBody, "Tracker State (JSON)", trackerStatePayload, 2).body;
+    if (params.render_table) {
+      trackerBody = upsertSectionContent(trackerBody, "Tracker Table", renderTrackerTable(issues), 2).body;
+    }
+
+    const summaryLineParts = [
+      new Date().toISOString(),
+      `updated=${updatedIds.length > 0 ? updatedIds.join(",") : "none"}`,
+      `created=${createdIds.length > 0 ? createdIds.join(",") : "none"}`,
+      `deleted=${deletedIds.length > 0 ? deletedIds.join(",") : "none"}`,
+      `unresolved=${unresolvedIds.length > 0 ? unresolvedIds.join(",") : "none"}`,
+    ];
+    if (duplicateIds.length > 0) summaryLineParts.push(`duplicate_ids=${duplicateIds.join(",")}`);
+    if (trackerState.warnings.length > 0) summaryLineParts.push(`warnings=${trackerState.warnings.join("; ")}`);
+    const summaryLine = `- ${summaryLineParts.join(" | ")}`;
+
+    const existingLogSection = getSectionContent(trackerBody, "Tracker Sync Log");
+    const existingEntries = existingLogSection
+      ? existingLogSection.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("- "))
+      : [];
+    const nextEntries = [summaryLine, ...existingEntries].slice(0, Math.max(1, params.max_log_entries));
+    trackerBody = upsertSectionContent(trackerBody, "Tracker Sync Log", nextEntries.join("\n"), 2).body;
+
+    const nextTrackerFrontmatter = touchUpdated(trackerParsed.data ?? {});
+    const finalTrackerContent = Object.keys(nextTrackerFrontmatter).length > 0
+      ? matter.stringify(trackerBody.trimEnd() + "\n", nextTrackerFrontmatter)
+      : trackerBody.trimEnd() + "\n";
+    await ensureDir(trackerFullPath);
+    await fs.writeFile(trackerFullPath, finalTrackerContent, "utf-8");
+
+    let sessionLogPath = "";
+    if (params.log_to_session && projectDir) {
+      sessionLogPath = `${projectDir}/Session Logs/${params.session_date}.md`;
+      const trackerSummaryBlock = [
+        `## Tracker Sync (${new Date().toISOString()})`,
+        `- Tracker: \`${normalizedTrackerPath}\``,
+        `- Updated IDs: ${updatedIds.length > 0 ? updatedIds.join(", ") : "none"}`,
+        `- Created IDs: ${createdIds.length > 0 ? createdIds.join(", ") : "none"}`,
+        `- Deleted IDs: ${deletedIds.length > 0 ? deletedIds.join(", ") : "none"}`,
+        `- Unresolved IDs: ${unresolvedIds.length > 0 ? unresolvedIds.join(", ") : "none"}`,
+      ].join("\n");
+      await appendMarkdownBlock(
+        sessionLogPath,
+        trackerSummaryBlock,
+        `# Session Log — ${params.session_date}`
+      );
+    }
+
+    return {
+      success: true,
+      project_context_path: resolvedProjectContextPath,
+      tracker_path: normalizedTrackerPath,
+      tracker_existed: trackerExists,
+      parse_source: trackerState.source,
+      warnings: trackerState.warnings,
+      duplicate_ids: duplicateIds,
+      issue_count: issues.length,
+      status_counts: getTrackerStatusCounts(issues),
+      updated_ids: updatedIds,
+      created_ids: createdIds,
+      deleted_ids: deletedIds,
+      unresolved_ids: unresolvedIds,
+      session_log_path: sessionLogPath || null,
+    };
+  }
+
+  async function runStaleStateChecks(params: {
+    tracker_stale_days: number;
+    validation_stale_days: number;
+    project_context_stale_days: number;
+  }): Promise<Record<string, any>> {
+    const now = Date.now();
+    const projectContextFiles: string[] = [];
+    const projectsDir = resolveVaultPath(vaultRoot, "Work/Projects");
+    if (await pathExists(projectsDir)) {
+      const projectFiles = await getMarkdownFiles(projectsDir, vaultRoot);
+      for (const filePath of projectFiles) {
+        if (/^Work\/Projects\/.+\/_Context\.md$/i.test(filePath.replace(/\\/g, "/"))) {
+          projectContextFiles.push(filePath.replace(/\\/g, "/"));
+        }
+      }
+    }
+
+    const staleProjectContexts: Array<{ path: string; days_since_update: number }> = [];
+    const staleTrackers: Array<{ project_context_path: string; tracker_path: string; days_since_update: number }> = [];
+    const missingTrackers: Array<{ project_context_path: string; tracker_path: string }> = [];
+    const duplicateTrackerIds: Array<{ tracker_path: string; ids: string[] }> = [];
+    const staleInValidation: Array<{ tracker_path: string; id: string; status: string; days_in_status: number }> = [];
+
+    for (const contextPath of projectContextFiles) {
+      const contextFullPath = resolveVaultPath(vaultRoot, contextPath);
+      const contextStats = await fs.stat(contextFullPath);
+      const contextAgeDays = Math.floor((now - contextStats.mtime.getTime()) / (1000 * 60 * 60 * 24));
+      if (contextAgeDays > params.project_context_stale_days) {
+        staleProjectContexts.push({
+          path: contextPath,
+          days_since_update: contextAgeDays,
+        });
+      }
+
+      const raw = await fs.readFile(contextFullPath, "utf-8");
+      const parsed = matter(raw);
+      const trackerPathRaw = typeof parsed.data.tracker_path === "string" ? parsed.data.tracker_path : "";
+      if (!trackerPathRaw) continue;
+
+      const trackerPath = normalizeNotePath(trackerPathRaw);
+      const trackerFullPath = resolveVaultPath(vaultRoot, trackerPath);
+      if (!await pathExists(trackerFullPath)) {
+        missingTrackers.push({
+          project_context_path: contextPath,
+          tracker_path: trackerPath,
+        });
+        continue;
+      }
+
+      const trackerStats = await fs.stat(trackerFullPath);
+      const trackerAgeDays = Math.floor((now - trackerStats.mtime.getTime()) / (1000 * 60 * 60 * 24));
+      if (trackerAgeDays > params.tracker_stale_days) {
+        staleTrackers.push({
+          project_context_path: contextPath,
+          tracker_path: trackerPath,
+          days_since_update: trackerAgeDays,
+        });
+      }
+
+      const trackerRaw = await fs.readFile(trackerFullPath, "utf-8");
+      const trackerParsed = matter(trackerRaw);
+      const trackerState = parseTrackerState(trackerParsed.content || "");
+      if (trackerState.duplicate_ids.length > 0) {
+        duplicateTrackerIds.push({
+          tracker_path: trackerPath,
+          ids: trackerState.duplicate_ids,
+        });
+      }
+
+      for (const issue of trackerState.issues) {
+        const status = normalizeTrackerStatus(issue.status);
+        if (status !== "In Validation") continue;
+        const dateCandidate = issue.updated ?? issue.last_updated ?? issue.date ?? issue.modified;
+        const parsedDate = parseDateInput(dateCandidate);
+        if (!parsedDate) continue;
+        const daysInStatus = Math.floor((now - parsedDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysInStatus > params.validation_stale_days) {
+          staleInValidation.push({
+            tracker_path: trackerPath,
+            id: issue.id,
+            status,
+            days_in_status: daysInStatus,
+          });
+        }
+      }
+    }
+
+    return {
+      success: true,
+      scanned_project_context_count: projectContextFiles.length,
+      checks: {
+        tracker_stale_days: params.tracker_stale_days,
+        validation_stale_days: params.validation_stale_days,
+        project_context_stale_days: params.project_context_stale_days,
+      },
+      results: {
+        stale_project_contexts: staleProjectContexts,
+        stale_trackers: staleTrackers,
+        missing_trackers: missingTrackers,
+        duplicate_tracker_ids: duplicateTrackerIds,
+        stale_in_validation: staleInValidation,
+      },
+      counts: {
+        stale_project_contexts: staleProjectContexts.length,
+        stale_trackers: staleTrackers.length,
+        missing_trackers: missingTrackers.length,
+        duplicate_tracker_ids: duplicateTrackerIds.length,
+        stale_in_validation: staleInValidation.length,
+      },
     };
   }
 
@@ -1679,10 +2580,12 @@ Returns:
   
   server.tool(
     "vault_context_bootstrap",
-    `Load core context notes in one call.
+    `Load core Flywheel context in one call.
 
 Args:
   - project_context_path (string, optional): Path to active project context note
+  - include_recent (boolean): Include recent files block (default: true)
+  - recent_path (string, optional): Limit recent scan to a folder path
   - days (number, optional): Look back N days for recent changes (default: 7)
   - recent_limit (number, optional): Max recent files to return (default: 10)
   - include_frontmatter (boolean): Parse frontmatter in loaded notes (default: true)
@@ -1690,107 +2593,516 @@ Args:
 Returns:
   Home.md, _Context/Now.md, active project context, and recent file activity`,
     {
-      project_context_path: z.string().default("_Context/Project.md").describe("Active project context note path"),
+      project_context_path: z.string().default(DEFAULT_PROJECT_CONTEXT_PATH).describe("Active project context note path"),
+      include_recent: z.boolean().default(true).describe("Include recent files in response"),
+      recent_path: z.string().optional().describe("Optional recent scope folder path"),
       days: z.number().min(1).max(30).default(7).describe("Recent lookback in days"),
       recent_limit: z.number().min(1).max(50).default(10).describe("Max recent files"),
       include_frontmatter: z.boolean().default(true).describe("Parse frontmatter separately"),
     },
-    async ({ project_context_path, days, recent_limit, include_frontmatter }) => {
+    async ({ project_context_path, include_recent, recent_path, days, recent_limit, include_frontmatter }) => {
       try {
-        const startupPaths = [
-          "Home.md",
-          "_Context/Now.md",
-          project_context_path,
-        ];
-
-        interface StartupNote {
-          path: string;
-          success: boolean;
-          frontmatter?: Record<string, any> | null;
-          content?: string;
-          error?: string;
-        }
-
-        const notes: StartupNote[] = [];
-
-        for (const startupPath of startupPaths) {
-          let normalizedPath: string;
-          let fullPath: string;
-          try {
-            const resolved = resolveNotePath(startupPath);
-            normalizedPath = resolved.normalizedPath;
-            fullPath = resolved.fullPath;
-          } catch (error) {
-            notes.push({
-              path: startupPath,
-              success: false,
-              error: error instanceof Error ? error.message : "Invalid path",
-            });
-            continue;
-          }
-
-          if (!await pathExists(fullPath)) {
-            notes.push({
-              path: normalizedPath,
-              success: false,
-              error: "Note not found",
-            });
-            continue;
-          }
-
-          const raw = await fs.readFile(fullPath, "utf-8");
-          if (include_frontmatter) {
-            const { data: frontmatter, content } = matter(raw);
-            notes.push({
-              path: normalizedPath,
-              success: true,
-              frontmatter: Object.keys(frontmatter).length > 0 ? frontmatter : null,
-              content: content.trim(),
-            });
-          } else {
-            notes.push({
-              path: normalizedPath,
-              success: true,
-              content: raw,
-            });
-          }
-        }
-
-        const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
-        const files = await getMarkdownFiles(vaultRoot, vaultRoot);
-        const recent: Array<{ path: string; modified: string; days_ago: number }> = [];
-
-        for (const filePath of files) {
-          try {
-            const stat = await fs.stat(resolveVaultPath(vaultRoot, filePath));
-            if (stat.mtime.getTime() < cutoff) continue;
-            recent.push({
-              path: filePath,
-              modified: stat.mtime.toISOString(),
-              days_ago: Math.floor((Date.now() - stat.mtime.getTime()) / (1000 * 60 * 60 * 24)),
-            });
-          } catch {
-            continue;
-          }
-        }
-
-        recent.sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
-        const recentLimited = recent.slice(0, recent_limit);
+        const normalizedProjectContextPath = normalizeNotePath(project_context_path);
+        const result = await runContextBootstrapInternal({
+          project_context_path: normalizedProjectContextPath,
+          include_recent,
+          recent_path: recent_path?.trim(),
+          days,
+          recent_limit,
+          include_frontmatter,
+        });
 
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               success: true,
-              startup_paths: startupPaths,
-              loaded_notes: notes,
-              loaded_successfully: notes.filter(n => n.success).length,
-              recent: {
-                days,
-                total_found: recent.length,
-                files: recentLimited,
-              },
+              ...result,
             }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // START SESSION (Deterministic startup macro)
+  // ============================================================
+
+  server.tool(
+    "vault_start_session",
+    `Deterministic session start for multi-project workflows.
+
+Args:
+  - override_project_context_path (string, optional): Explicit active project context path
+  - include_recent (boolean): Include recent files block (default: false)
+  - recent_path (string, optional): Scope path for recent files (defaults to active project folder when include_recent=true)
+  - days (number): Recent lookback window in days (default: 7)
+  - recent_limit (number): Maximum recent files (default: 10)
+  - include_frontmatter (boolean): Parse frontmatter in loaded notes (default: true)
+
+Returns:
+  Active project routing info, bootstrap payload, and target project summary`,
+    {
+      override_project_context_path: z.string().optional().describe("Optional explicit active project context path"),
+      include_recent: z.boolean().default(false).describe("Include recent files block"),
+      recent_path: z.string().optional().describe("Optional recent scope path"),
+      days: z.number().min(1).max(30).default(7).describe("Recent lookback in days"),
+      recent_limit: z.number().min(1).max(50).default(10).describe("Max recent files"),
+      include_frontmatter: z.boolean().default(true).describe("Parse frontmatter"),
+    },
+    async ({ override_project_context_path, include_recent, recent_path, days, recent_limit, include_frontmatter }) => {
+      try {
+        const activeProject = await resolveActiveProjectContextPath(override_project_context_path);
+        const projectDir = deriveProjectDir(activeProject.project_context_path);
+        const effectiveRecentPath = include_recent
+          ? (recent_path?.trim() || projectDir || "")
+          : "";
+
+        const bootstrap = await runContextBootstrapInternal({
+          project_context_path: activeProject.project_context_path,
+          include_recent,
+          recent_path: effectiveRecentPath || undefined,
+          days,
+          recent_limit,
+          include_frontmatter,
+        });
+
+        const projectNote = bootstrap.loaded_notes.find((note) => note.path === activeProject.project_context_path);
+        const projectSummary = projectNote?.success && projectNote.content
+          ? summarizeProjectContext(projectNote.content)
+          : { priorities: [], blockers: [], next_3_actions: [] };
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              active_project_context_path: activeProject.project_context_path,
+              active_project_context_source: activeProject.source,
+              active_project_dir: projectDir,
+              summary: projectSummary,
+              bootstrap,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // RESUME SESSION (Deterministic compact recovery)
+  // ============================================================
+
+  server.tool(
+    "vault_resume",
+    `Deterministic compact/recovery resume.
+
+Args:
+  - override_project_context_path (string, optional): Explicit active project context path
+  - session_date (string, optional): Date in YYYY-MM-DD for session log lookup (default: today)
+  - include_recent (boolean): Include recent files block (default: false)
+  - recent_path (string, optional): Optional recent scope path
+  - days (number): Recent lookback in days (default: 7)
+  - recent_limit (number): Max recent files (default: 10)
+  - include_frontmatter (boolean): Parse frontmatter (default: true)
+
+Returns:
+  Bootstrap payload + target project context + latest session log + tracker snapshot`,
+    {
+      override_project_context_path: z.string().optional().describe("Optional explicit project context path"),
+      session_date: z.string().optional().describe("Session date in YYYY-MM-DD (default: today)"),
+      include_recent: z.boolean().default(false).describe("Include recent files"),
+      recent_path: z.string().optional().describe("Optional recent scope path"),
+      days: z.number().min(1).max(30).default(7).describe("Recent lookback in days"),
+      recent_limit: z.number().min(1).max(50).default(10).describe("Max recent files"),
+      include_frontmatter: z.boolean().default(true).describe("Parse frontmatter"),
+    },
+    async ({ override_project_context_path, session_date, include_recent, recent_path, days, recent_limit, include_frontmatter }) => {
+      try {
+        const effectiveSessionDate = session_date?.trim() || getTodayIsoDate();
+        const activeProject = await resolveActiveProjectContextPath(override_project_context_path);
+        const projectDir = deriveProjectDir(activeProject.project_context_path);
+        const effectiveRecentPath = include_recent
+          ? (recent_path?.trim() || projectDir || "")
+          : "";
+
+        const bootstrap = await runContextBootstrapInternal({
+          project_context_path: activeProject.project_context_path,
+          include_recent,
+          recent_path: effectiveRecentPath || undefined,
+          days,
+          recent_limit,
+          include_frontmatter,
+        });
+
+        const projectContext = await readNoteRecord(activeProject.project_context_path, true);
+        if (!projectContext.success || !projectContext.content) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: projectContext.error ?? `Unable to read project context: ${activeProject.project_context_path}`,
+              }, null, 2),
+            }],
+          };
+        }
+
+        const summary = summarizeProjectContext(projectContext.content);
+        const sessionLogPath = projectDir
+          ? `${projectDir}/Session Logs/${effectiveSessionDate}`
+          : "";
+        const sessionLog = sessionLogPath
+          ? await readNoteRecord(sessionLogPath, true)
+          : {
+              path: "",
+              success: false,
+              error: "No project directory available for session log lookup",
+            } satisfies StartupNote;
+
+        let trackerSnapshot: Record<string, any> | null = null;
+        const trackerPathRaw = typeof projectContext.frontmatter?.tracker_path === "string"
+          ? projectContext.frontmatter.tracker_path
+          : "";
+        if (trackerPathRaw) {
+          const trackerPath = normalizeNotePath(trackerPathRaw);
+          const trackerRecord = await readNoteRecord(trackerPath, true);
+          if (trackerRecord.success && trackerRecord.content) {
+            const parsed = parseTrackerState(trackerRecord.content);
+            trackerSnapshot = {
+              path: trackerPath,
+              source: parsed.source,
+              issue_count: parsed.issues.length,
+              status_counts: getTrackerStatusCounts(parsed.issues),
+              duplicate_ids: parsed.duplicate_ids,
+              warnings: parsed.warnings,
+            };
+          } else {
+            trackerSnapshot = {
+              path: trackerPath,
+              error: trackerRecord.error ?? "Tracker note unavailable",
+            };
+          }
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              active_project_context_path: activeProject.project_context_path,
+              active_project_context_source: activeProject.source,
+              active_project_dir: projectDir,
+              summary,
+              bootstrap,
+              session_log: sessionLog.path
+                ? {
+                    path: sessionLog.path,
+                    exists: sessionLog.success,
+                    error: sessionLog.success ? null : (sessionLog.error ?? "Session log not found"),
+                  }
+                : null,
+              tracker_snapshot: trackerSnapshot,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // TRACKER SYNC (Deterministic tracker updates)
+  // ============================================================
+
+  server.tool(
+    "vault_tracker_sync",
+    `Deterministic defect/enhancement tracker sync.
+
+Args:
+  - override_project_context_path (string, optional): Explicit active project context path
+  - tracker_path (string, optional): Explicit tracker note path (otherwise uses project frontmatter tracker_path)
+  - updates (array, optional): Structured issue updates
+  - create_missing (boolean): Create issue records if IDs don't exist (default: true)
+  - render_table (boolean): Render tracker table section from structured state (default: true)
+  - max_log_entries (number): Tracker sync log retention size (default: 20)
+  - log_to_session (boolean): Append tracker sync summary to project session log (default: true)
+  - session_date (string): Session date in YYYY-MM-DD (default: today)
+
+Returns:
+  Tracker sync summary with updated/created/deleted/unresolved IDs`,
+    {
+      override_project_context_path: z.string().optional().describe("Optional explicit project context path"),
+      tracker_path: z.string().optional().describe("Optional explicit tracker path"),
+      updates: z.array(z.object({
+        id: z.string().min(1),
+        action: z.enum(["upsert", "delete"]).optional(),
+        status: z.string().optional(),
+        note: z.string().optional(),
+        title: z.string().optional(),
+        type: z.string().optional(),
+        priority: z.string().optional(),
+        owner: z.string().optional(),
+      })).default([]).describe("Structured tracker updates"),
+      create_missing: z.boolean().default(true).describe("Create missing IDs"),
+      render_table: z.boolean().default(true).describe("Render markdown tracker table"),
+      max_log_entries: z.number().min(1).max(200).default(20).describe("Tracker sync log retention"),
+      log_to_session: z.boolean().default(true).describe("Append summary to project session log"),
+      session_date: z.string().optional().describe("Session date in YYYY-MM-DD (default: today)"),
+    },
+    async ({ override_project_context_path, tracker_path, updates, create_missing, render_table, max_log_entries, log_to_session, session_date }) => {
+      try {
+        const effectiveSessionDate = session_date?.trim() || getTodayIsoDate();
+        const activeProject = await resolveActiveProjectContextPath(override_project_context_path);
+        const result = await runTrackerSyncInternal({
+          project_context_path: activeProject.project_context_path,
+          tracker_path,
+          updates,
+          create_missing,
+          render_table,
+          max_log_entries,
+          log_to_session,
+          session_date: effectiveSessionDate,
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ...result,
+              active_project_context_source: activeProject.source,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // CHECKPOINT (Deterministic session checkpoint + logging)
+  // ============================================================
+
+  server.tool(
+    "vault_checkpoint",
+    `Deterministic checkpoint workflow for project context + logging.
+
+Args:
+  - override_project_context_path (string, optional): Explicit active project context path
+  - status (array, optional): Current status bullets for project context
+  - priorities (array, optional): Current priorities bullets
+  - blockers (array, optional): Known risks/blockers bullets
+  - next_actions (array, optional): Next action bullets (top 3 retained in summary)
+  - summary_note (string, optional): One-line checkpoint summary note
+  - session_date (string): Date in YYYY-MM-DD for session log/pointer (default: today)
+  - include_tracker_sync (boolean): Run tracker sync during checkpoint (default: true)
+  - tracker_updates (array, optional): Structured tracker updates passed to tracker sync
+
+Returns:
+  Updated project context paths, session log paths, pointer note status, and optional tracker sync result`,
+    {
+      override_project_context_path: z.string().optional().describe("Optional explicit project context path"),
+      status: z.array(z.string()).default([]).describe("Current status bullets"),
+      priorities: z.array(z.string()).default([]).describe("Current priorities bullets"),
+      blockers: z.array(z.string()).default([]).describe("Known blockers/risk bullets"),
+      next_actions: z.array(z.string()).default([]).describe("Next actions"),
+      summary_note: z.string().optional().describe("One-line checkpoint summary"),
+      session_date: z.string().optional().describe("Session date in YYYY-MM-DD (default: today)"),
+      include_tracker_sync: z.boolean().default(true).describe("Run tracker sync"),
+      tracker_updates: z.array(z.object({
+        id: z.string().min(1),
+        action: z.enum(["upsert", "delete"]).optional(),
+        status: z.string().optional(),
+        note: z.string().optional(),
+        title: z.string().optional(),
+        type: z.string().optional(),
+        priority: z.string().optional(),
+        owner: z.string().optional(),
+      })).default([]).describe("Structured tracker updates for checkpoint"),
+    },
+    async ({ override_project_context_path, status, priorities, blockers, next_actions, summary_note, session_date, include_tracker_sync, tracker_updates }) => {
+      try {
+        const effectiveSessionDate = session_date?.trim() || getTodayIsoDate();
+        const activeProject = await resolveActiveProjectContextPath(override_project_context_path);
+        const projectContextPath = activeProject.project_context_path;
+        const projectContextRecord = await readNoteRecord(projectContextPath, true);
+        if (!projectContextRecord.success || !projectContextRecord.content) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                error: projectContextRecord.error ?? `Unable to read project context: ${projectContextPath}`,
+              }, null, 2),
+            }],
+          };
+        }
+
+        let projectBody = projectContextRecord.content;
+        const sectionUpdates: Array<{ section: string; action: "updated" | "inserted" }> = [];
+
+        const statusLines = [...status];
+        if (summary_note?.trim()) statusLines.unshift(summary_note.trim());
+        if (statusLines.length > 0) {
+          const upserted = upsertSectionContent(projectBody, "Current Status", toBulletSection(statusLines), 2);
+          projectBody = upserted.body;
+          sectionUpdates.push({ section: "Current Status", action: upserted.action });
+        }
+
+        if (priorities.length > 0) {
+          const upserted = upsertSectionContent(projectBody, "Current Priorities", toBulletSection(priorities), 2);
+          projectBody = upserted.body;
+          sectionUpdates.push({ section: "Current Priorities", action: upserted.action });
+        }
+
+        if (blockers.length > 0) {
+          const upserted = upsertSectionContent(projectBody, "Known Risks/Blockers", toBulletSection(blockers), 2);
+          projectBody = upserted.body;
+          sectionUpdates.push({ section: "Known Risks/Blockers", action: upserted.action });
+        }
+
+        if (next_actions.length > 0) {
+          const upserted = upsertSectionContent(projectBody, "Next 3 Actions", toBulletSection(next_actions.slice(0, 3)), 2);
+          projectBody = upserted.body;
+          sectionUpdates.push({ section: "Next 3 Actions", action: upserted.action });
+        }
+
+        await writeNoteWithFrontmatter(projectContextPath, projectBody, projectContextRecord.frontmatter ?? {});
+
+        const projectDir = deriveProjectDir(projectContextPath);
+        const projectName = path.posix.basename(projectDir || projectContextPath, ".md");
+        const sessionLogPath = projectDir
+          ? `${projectDir}/Session Logs/${effectiveSessionDate}.md`
+          : `Session Logs/${effectiveSessionDate}.md`;
+        const latestSummary = summarizeProjectContext(projectBody);
+
+        const checkpointLogBlock = [
+          `## Checkpoint (${new Date().toISOString()})`,
+          `- Active project context path: \`${projectContextPath}\``,
+          `- Section updates: ${sectionUpdates.length > 0 ? sectionUpdates.map((s) => `${s.section} (${s.action})`).join(", ") : "none"}`,
+          `- Priorities: ${latestSummary.priorities.length > 0 ? latestSummary.priorities.join(" | ") : "none"}`,
+          `- Blockers: ${latestSummary.blockers.length > 0 ? latestSummary.blockers.join(" | ") : "none"}`,
+          `- Next 3 actions: ${latestSummary.next_3_actions.length > 0 ? latestSummary.next_3_actions.join(" | ") : "none"}`,
+        ].join("\n");
+        await appendMarkdownBlock(
+          sessionLogPath,
+          checkpointLogBlock,
+          `# Session Log — ${effectiveSessionDate}`
+        );
+
+        const pointerResult = await ensureRootSessionPointer(effectiveSessionDate, normalizeNotePath(sessionLogPath), projectName);
+
+        let trackerSyncResult: Record<string, any> | null = null;
+        if (include_tracker_sync) {
+          trackerSyncResult = await runTrackerSyncInternal({
+            project_context_path: projectContextPath,
+            updates: tracker_updates,
+            create_missing: true,
+            render_table: true,
+            max_log_entries: 20,
+            log_to_session: false,
+            session_date: effectiveSessionDate,
+          });
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              active_project_context_path: projectContextPath,
+              active_project_context_source: activeProject.source,
+              active_project_dir: projectDir,
+              project_context_sections_updated: sectionUpdates,
+              session_log_path: normalizeNotePath(sessionLogPath),
+              pointer_note: pointerResult,
+              summary: latestSummary,
+              tracker_sync: trackerSyncResult,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: false,
+              error: error instanceof Error ? error.message : "Unknown error",
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // STALE STATE CHECKS
+  // ============================================================
+
+  server.tool(
+    "vault_stale_state_checks",
+    `Run stale-state health checks across project contexts and trackers.
+
+Checks:
+  - tracker_path present but tracker not updated in X days
+  - issues in In Validation older than Y days
+  - duplicate tracker IDs
+  - project context older than X days`,
+    {
+      tracker_stale_days: z.number().min(1).max(365).default(7).describe("Tracker stale threshold in days"),
+      validation_stale_days: z.number().min(1).max(365).default(14).describe("In Validation stale threshold in days"),
+      project_context_stale_days: z.number().min(1).max(365).default(14).describe("Project context stale threshold in days"),
+    },
+    async ({ tracker_stale_days, validation_stale_days, project_context_stale_days }) => {
+      try {
+        const results = await runStaleStateChecks({
+          tracker_stale_days,
+          validation_stale_days,
+          project_context_stale_days,
+        });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(results, null, 2),
           }],
         };
       } catch (error) {
@@ -1996,7 +3308,7 @@ Returns:
           }
         }
 
-        // Context-system integrity checks (root scope only)
+        // Flywheel integrity checks (root scope only)
         const duplicateLastUpdatedFiles: Array<{ path: string; count: number }> = [];
         const indexUpdatedMismatches: Array<{
           link: string;
@@ -2128,17 +3440,6 @@ Returns:
           .sort((a, b) => b[1] - a[1])
           .slice(0, 10)
           .map(([tag, count]) => ({ tag, count }));
-
-        const contextSystemChecks = {
-          scope: normalizedSearchPath === "" ? "vault_root" : "limited_path",
-          canonical_docs: canonicalDocs,
-          duplicate_last_updated_footer_count: duplicateLastUpdatedFiles.length,
-          duplicate_last_updated_footer_files: duplicateLastUpdatedFiles,
-          index_updated_mismatch_count: indexUpdatedMismatches.length,
-          index_updated_mismatches: indexUpdatedMismatches,
-          orphan_context_doc_count: orphanContextDocs.length,
-          orphan_context_docs: orphanContextDocs,
-        };
         
         return {
           content: [{
@@ -2159,8 +3460,16 @@ Returns:
               },
               types: typeCounts,
               top_tags: topTags,
-              context_system_checks: contextSystemChecks,
-              flywheel_checks: contextSystemChecks,
+              flywheel_checks: {
+                scope: normalizedSearchPath === "" ? "vault_root" : "limited_path",
+                canonical_docs: canonicalDocs,
+                duplicate_last_updated_footer_count: duplicateLastUpdatedFiles.length,
+                duplicate_last_updated_footer_files: duplicateLastUpdatedFiles,
+                index_updated_mismatch_count: indexUpdatedMismatches.length,
+                index_updated_mismatches: indexUpdatedMismatches,
+                orphan_context_doc_count: orphanContextDocs.length,
+                orphan_context_docs: orphanContextDocs,
+              },
               health: {
                 frontmatter_coverage: files.length > 0 && withFrontmatter / files.length > 0.8 ? "good" : "needs_attention",
                 stale_content: files.length > 0 && stale / files.length > 0.3 ? "needs_review" : "ok",
@@ -2190,4 +3499,6 @@ Returns:
   console.error("  Registered: vault_batch_read, vault_find_by_tag");
   console.error("  Registered: vault_backlinks, vault_broken_links, vault_stats");
   console.error("  Registered: vault_context_bootstrap, vault_upsert_section");
+  console.error("  Registered: vault_start_session, vault_checkpoint, vault_tracker_sync, vault_resume");
+  console.error("  Registered: vault_stale_state_checks");
 }

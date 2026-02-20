@@ -1,5 +1,5 @@
 /**
- * Obsidian AI Cortex MCP Server
+ * Obsidian MCP Server
  * 
  * Direct filesystem access to Obsidian vaults for:
  * - Reading and writing notes
@@ -35,7 +35,7 @@ function getVaultPath(): string {
  * Main entry point
  */
 async function main(): Promise<void> {
-  console.error("Starting Obsidian AI Cortex MCP Server...");
+  console.error("Starting Obsidian MCP Server...");
   
   // Validate configuration
   const vaultPath = getVaultPath();
@@ -43,8 +43,8 @@ async function main(): Promise<void> {
   
   // Create MCP server
   const server = new McpServer({
-    name: "obsidian-ai-cortex-mcp",
-    version: "1.1.0"
+    name: "obsidian-mcp",
+    version: "1.2.0"
   });
   
   // Register all vault tools
@@ -56,7 +56,7 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   
-  console.error("Obsidian AI Cortex MCP Server running");
+  console.error("Obsidian MCP Server running");
 }
 
 // Handle errors
