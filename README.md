@@ -85,6 +85,73 @@ Example (Cursor-style MCP config):
 
 ---
 
+## Starter Vault (demo)
+
+A ready-to-use demo vault is included at:
+
+- `starter-vault/`
+
+This is the fastest way to validate your MCP setup and deterministic flywheel behavior.
+
+### What is included
+
+- `_Context/Now.md` with `active_project_context`
+- one demo project context
+- one configured tracker (`tracker_path`)
+- one demo session log
+- minimal prompt templates
+
+### Starter vault layout
+
+```text
+starter-vault/
+?? Home.md
+?? _Context/
+?  ?? Now.md
+?? Prompts/
+?  ?? Index.md
+?  ?? 00 - Start Macro.md
+?  ?? 01 - Checkpoint Macro.md
+?  ?? 02 - Tracker Sync Macro.md
+?  ?? 03 - Resume Macro.md
+?? Work/
+   ?? Projects/
+   ?  ?? Projects Index.md
+   ?  ?? AI Tools/
+   ?     ?? MCP - Demo Project/
+   ?        ?? _Context.md
+   ?        ?? Defect & Enhancement Tracker.md
+   ?        ?? Session Logs/2026-02-20.md
+   ?? Session End Logs/
+      ?? Index.md
+      ?? 2026-02-20.md
+```
+
+### Recommended setup
+
+Copy the starter vault to a separate location before using it (so your repo working tree stays clean):
+
+**macOS/Linux**
+
+```bash
+cp -R starter-vault "$HOME/Obsidian-AI-Cortex-Starter-Vault"
+```
+
+**Windows PowerShell**
+
+```powershell
+Copy-Item -Path .\starter-vault -Destination "$env:USERPROFILE\Documents\Obsidian-AI-Cortex-Starter-Vault" -Recurse
+```
+
+Then set `OBSIDIAN_VAULT_PATH` to that copied folder and run:
+
+```text
+Use Obsidian MCP for this session.
+Run start macro now.
+```
+
+---
+
 ## Quick start (recommended workflow)
 
 In a brand-new chat, use:
