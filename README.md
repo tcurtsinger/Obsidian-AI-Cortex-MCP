@@ -152,6 +152,28 @@ Run start macro now.
 
 ---
 
+## Starter prompts folder
+
+You also get reusable copy/paste prompts at:
+
+- `starter-prompts/`
+
+This includes the full generic prompt set:
+
+- start
+- checkpoint
+- tracker sync
+- resume
+- pre/post compact
+- project switch
+- tracker structured updates
+
+Start here:
+
+- `starter-prompts/Index.md`
+
+---
+
 ## Quick start (recommended workflow)
 
 In a brand-new chat, use:
