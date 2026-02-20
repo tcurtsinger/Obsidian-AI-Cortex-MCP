@@ -1,167 +1,318 @@
-# Obsidian MCP Server
+# Obsidian AI Cortex MCP
 
-MCP (Model Context Protocol) server for direct Obsidian vault access. Works without Obsidian running.
+Deterministic, filesystem-native MCP server for Obsidian vaults.
 
-## Features
+Use it to let AI agents (Cursor, Claude Code, Codex, etc.) safely read/write notes, route to the correct project context, checkpoint before compact, and resume exactly where work left off.
 
-23 tools for complete vault management and deterministic multi-project workflows:
+> Works without Obsidian running. Uses direct filesystem access.
 
-### Core Tools
-| Tool | Description |
-|------|-------------|
-| `vault_read` | Read a single note |
-| `vault_batch_read` | Read multiple notes at once |
-| `vault_write` | Create or update a note |
-| `vault_append` | Append content to existing note |
-| `vault_delete` | Delete a note |
-| `vault_move` | Move or rename notes |
+---
 
-### Discovery Tools
-| Tool | Description |
-|------|-------------|
-| `vault_list` | List files/folders |
-| `vault_tree` | Get folder hierarchy |
-| `vault_search` | Search text across all notes |
-| `vault_recent` | Find recently modified files |
-| `vault_find_by_tag` | Find docs by frontmatter tag |
-| `vault_frontmatter` | Query/update YAML metadata |
+## Why this exists
 
-### Maintenance Tools
-| Tool | Description |
-|------|-------------|
-| `vault_backlinks` | Find docs linking to a given doc |
-| `vault_broken_links` | Find broken wiki-links |
-| `vault_stats` | Vault health and statistics |
-| `vault_stale_state_checks` | Stale-state checks across project contexts/trackers |
-| `vault_daily_note` | Access daily notes |
-| `vault_context_bootstrap` | Load startup context pack in one call |
-| `vault_upsert_section` | Replace or insert a specific markdown section |
+Most AI coding workflows fail in long sessions because of:
 
-### Flywheel Macro Tools (Deterministic)
-| Tool | Description |
-|------|-------------|
-| `vault_start_session` | Resolve active project + run scoped bootstrap + summarize priorities/blockers/next actions |
-| `vault_checkpoint` | Update project context + append session log + pointer note + optional tracker sync |
-| `vault_tracker_sync` | Structured tracker sync (JSON state + rendered table + sync log) |
-| `vault_resume` | Deterministic post-compact resume from project context/session log/tracker |
+- cross-project context bleed
+- stale or missing session memory after compact
+- trackers drifting out of sync
+- token-heavy startup context gathering
 
-## Setup
+This server solves that with a **deterministic flywheel** built into MCP tools.
 
-### 1. Install Dependencies
+---
+
+## What you get
+
+- **23 vault tools** (read/write/search/discovery/maintenance)
+- **Deterministic session macros**:
+  - `vault_start_session`
+  - `vault_checkpoint`
+  - `vault_tracker_sync`
+  - `vault_resume`
+- **Structured tracker model** (machine-first JSON + rendered table + sync log)
+- **Project-scoped bootstrap** to avoid recency bleed
+- **Stale-state health checks** for project contexts + trackers
+- **Path-safety guardrails** (path traversal blocked to vault root)
+- **Auto `updated` frontmatter touch** on write/append/frontmatter updates
+
+---
+
+## Install
+
+### Prerequisites
+
+- Node.js **18+**
+- An Obsidian vault folder on local disk
+
+### 1) Clone
 
 ```bash
-cd obsidian-mcp
+git clone https://github.com/tcurtsinger/Obsidian-AI-Cortex-MCP.git
+cd Obsidian-AI-Cortex-MCP
+```
+
+### 2) Install dependencies
+
+```bash
 npm install
 ```
 
-### 2. Build
+### 3) Build
 
 ```bash
 npm run build
 ```
 
-### 3. Configure Cursor
+### 4) Configure your MCP client
 
-Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
+Set `OBSIDIAN_VAULT_PATH` to your vault root.
+
+Example (Cursor-style MCP config):
 
 ```json
 {
   "mcpServers": {
     "obsidian": {
       "command": "node",
-      "args": ["/path/to/obsidian-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/Obsidian-AI-Cortex-MCP/dist/index.js"],
       "env": {
-        "OBSIDIAN_VAULT_PATH": "/path/to/your/vault"
+        "OBSIDIAN_VAULT_PATH": "/absolute/path/to/your/vault"
       }
     }
   }
 }
 ```
 
-### 4. Restart Cursor
+---
 
-The MCP server loads on Cursor startup.
+## Quick start (recommended workflow)
 
-## Configuration
+In a brand-new chat, use:
 
-| Environment Variable | Description | Required |
-|---------------------|-------------|----------|
-| `OBSIDIAN_VAULT_PATH` | Full path to your Obsidian vault folder | Yes |
-
-## Usage Examples
-
-### Start session (deterministic)
 ```text
-vault_start_session
+Use Obsidian MCP for this session.
+Run start macro now.
 ```
 
+Or with explicit project override:
+
+```text
+Use Obsidian MCP for this session.
+Run start macro now.
+override_project_context_path="Work/Projects/<Area>/<Project Name>/_Context.md"
+```
+
+Then use these one-liners during work:
+
+- `Run checkpoint macro now.`
+- `Run tracker sync macro now.`
+- `Run resume macro now.`
+
+---
+
+## Deterministic flywheel model
+
+### Session start
+
+`vault_start_session`:
+
+1. Resolves active project context path
+2. Runs scoped bootstrap
+3. Returns **target-project-only** summary:
+   - priorities
+   - blockers
+   - next 3 actions
+
+### Checkpoint
+
+`vault_checkpoint`:
+
+- updates project context sections (if provided)
+- appends canonical project session log
+- maintains pointer note
+- optionally runs tracker sync
+
+### Tracker sync
+
+`vault_tracker_sync`:
+
+- updates canonical tracker JSON state
+- re-renders tracker table
+- appends sync audit log
+- supports structured `updates` payload for deterministic edits
+
+### Resume
+
+`vault_resume` restores from:
+
+1. project `_Context.md`
+2. `_Context/Now.md` routing metadata
+3. latest project session log
+4. tracker (if configured)
+
+---
+
+## Structured tracker format
+
+Trackers are maintained in this canonical shape:
+
+~~~md
+## Tracker State (JSON)
+
+```json
+[]
+```
+
+## Tracker Table
+| ID | Type | Status | Priority | Updated | Title | Note |
+
+## Tracker Sync Log
+- <timestamp> | updated=... | created=... | deleted=... | unresolved=...
+~~~
+
+**Rule:** JSON state is canonical. Table is a rendered view.
+
+---
+
+## Tool catalog (23)
+
+### Core tools
+
+- `vault_read`
+- `vault_batch_read`
+- `vault_write`
+- `vault_append`
+- `vault_delete`
+- `vault_move`
+
+### Discovery tools
+
+- `vault_list`
+- `vault_tree`
+- `vault_search`
+- `vault_recent`
+- `vault_find_by_tag`
+- `vault_frontmatter`
+
+### Maintenance tools
+
+- `vault_backlinks`
+- `vault_broken_links`
+- `vault_stats`
+- `vault_daily_note`
+- `vault_context_bootstrap`
+- `vault_upsert_section`
+- `vault_stale_state_checks`
+
+### Deterministic macro tools
+
+- `vault_start_session`
+- `vault_checkpoint`
+- `vault_tracker_sync`
+- `vault_resume`
+
+---
+
+## High-value usage examples
+
 ### Start session with project override
+
 ```text
 vault_start_session override_project_context_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex/_Context.md"
 ```
 
-### Scoped bootstrap (no cross-project recency bleed)
+### Scoped bootstrap (avoid cross-project recency bleed)
+
 ```text
 vault_context_bootstrap project_context_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex/_Context.md" include_recent=true recent_path="Work/Projects/AI Tools/MCP - Obsidian AI Cortex"
 ```
 
-### Deterministic checkpoint
+### Checkpoint with explicit status
+
 ```text
-vault_checkpoint priorities=["Validate startup macro in Cursor","Validate resume macro in Claude"] blockers=["None"] next_actions=["Run end-to-end test","Document edge cases","Tune thresholds"]
+vault_checkpoint priorities=["Validate start/checkpoint/resume in all IDEs"] blockers=["None"] next_actions=["Run stale checks","Review tracker drift","Finalize docs"] summary_note="Milestone checkpoint"
 ```
 
-### Structured tracker sync
+### Deterministic tracker update
+
 ```text
 vault_tracker_sync updates=[{"id":"E18","status":"In Validation","note":"Ready for QA"}]
 ```
 
 ### Resume after compact
+
 ```text
 vault_resume
 ```
 
-### Stale-state checks
+### Run stale-state health checks
+
 ```text
 vault_stale_state_checks tracker_stale_days=7 validation_stale_days=14 project_context_stale_days=14
 ```
 
-## Structured Tracker Model
+---
 
-`vault_tracker_sync` maintains machine-first tracker sections:
+## Suggested vault conventions
 
-- `## Tracker State (JSON)` — canonical structured issue state
-- `## Tracker Table` — rendered markdown view from canonical JSON
-- `## Tracker Sync Log` — deterministic audit trail of updates
+These are conventions that make the macros most reliable:
 
-This reduces ambiguous table edits and token-heavy revalidation.
+- `_Context/Now.md` contains routing metadata and `active_project_context`
+- project details live in `Work/Projects/.../_Context.md`
+- project logs live in:
+  - `Work/Projects/<Area>/<Project>/Session Logs/YYYY-MM-DD.md`
+- root `Work/Session End Logs/` remains pointer-only
+- trackers are configured via project frontmatter key:
+  - `tracker_path: Work/Projects/<Area>/<Project>/Defect & Enhancement Tracker.md`
 
-## Development
+---
 
-### Build
+## Scripts
+
 ```bash
-npm run build
+npm run build   # compile TypeScript to dist/
+npm run dev     # tsc --watch
+npm run start   # run built server
 ```
 
-### Watch mode
-```bash
-npm run dev
-```
+---
 
-## Tech Stack
+## Security model
 
-- Node.js / TypeScript
-- MCP SDK (`@modelcontextprotocol/sdk`)
-- gray-matter (frontmatter parsing)
-- zod (parameter validation)
+- No secrets hard-coded in repo
+- Vault location provided only via environment variable
+- Path normalization + vault-root boundary checks
+- Direct local filesystem operations (no required external API)
 
-## Security
+---
 
-- No credentials stored in code
-- Vault path configured via environment variable
-- Direct filesystem access (no network calls)
-- Path traversal blocked (paths cannot escape vault root)
-- Frontmatter `updated` is auto-refreshed on write/append/frontmatter updates
+## Troubleshooting
+
+### `OBSIDIAN_VAULT_PATH environment variable is required`
+Set the env var in your MCP client config and restart the client.
+
+### Wrong project loaded at start
+Your `active_project_context` in `_Context/Now.md` is likely stale. Either:
+- update that pointer, or
+- pass `override_project_context_path` to `vault_start_session`
+
+### Tracker sync says no tracker configured
+Add `tracker_path` in project `_Context.md` frontmatter.
+
+---
+
+## Tech stack
+
+- TypeScript
+- Node.js
+- `@modelcontextprotocol/sdk`
+- `gray-matter`
+- `zod`
+
+---
 
 ## License
 
 MIT
+
+If you use this in production AI workflows, consider opening issues/PRs with edge cases from real multi-project sessions.
